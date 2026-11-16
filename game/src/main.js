@@ -60,6 +60,11 @@ const raycaster = new THREE.Raycaster();
 raycaster.far = 90;
 
 const body = player.state;
+// Stable identity for the bot perception code: bots compare a seen target's
+// ref with the one they already track, so the player object must be the SAME
+// object every step — a fresh literal per step would reset every bot's
+// reaction timer and no bot would ever fire at the player.
+const playerTarget = { alive: true, pos: body.position, speed: 0 };
 const ALLY_NAMES = ['Rook', 'Sable', 'Wren'];
 const ENEMY_NAMES = ['Coyote', 'Dingo', 'Fennec', 'Gila', 'Sidewinder'];
 let hp = 100;
@@ -568,8 +573,10 @@ function step(dt) {
 
     // Bots.
     const site = siteById(m.targetSite);
+    playerTarget.alive = playerAlive;
+    playerTarget.speed = player.groundSpeed();
     bots.step(dt, elapsed, {
-      player: { alive: playerAlive, pos: body.position, speed: player.groundSpeed() },
+      player: playerTarget,
       bomb: {
         state: bomb.state.mode,
         site: bomb.state.site,
@@ -579,6 +586,7 @@ function step(dt) {
       targetSite: m.targetSite,
       sitePos: site,
       noises,
+      phase: m.phase,
       shoot: (bot, target, dist, moving) => botShoot(bot, target, dist, moving),
       onPlantDone: (bot) => {
         bomb.plant(m.targetSite, bot.pos);
@@ -746,15 +754,25 @@ function runShot(name) {
         enemy.parts.group.position.copy(enemy.pos);
         enemy.parts.group.rotation.y = enemy.yaw;
       }
-      settle(30);
+      // Park the other Jackals at site B for the frame, so none of them can
+      // shoot the player down the lane while the kill is staged.
+      for (const other of bots.bots) {
+        if (other.team === 'jackals' && other !== enemy) {
+          other.pos.set(18, 0, 13);
+          other.yaw = -Math.PI / 2;
+          other.parts.group.position.copy(other.pos);
+          other.parts.group.rotation.y = other.yaw;
+        }
+      }
+      settle(6);
       if (enemy) {
         // Three rifle hits (36 each) drop the bot; the killfeed shows the kill.
         aimAt(botAimPoint(enemy));
         shoot(0);
-        settle(6);
+        settle(3);
         aimAt(botAimPoint(enemy));
         shoot(0);
-        settle(6);
+        settle(3);
         aimAt(botAimPoint(enemy));
         shoot(0);
         // Let the kill land: the bot falls flat (0.4s) and the muzzle flash fades.

@@ -241,8 +241,13 @@ export function createBots(scene, world) {
   }
 
   function step(dt, time, ctx) {
+    // Combat only happens in the round: the buy phase is for positioning,
+    // not for dying — without this gate, bots gun each other down before the
+    // round clock even starts and a defender pulled west by buy-phase noise
+    // can be waiting on the attacker's spawn when the round opens.
+    const canFight = ctx.phase === 'round';
     // Hearing: gunshots heard this step pull bots within HEAR_DIST toward the noise.
-    for (const noise of ctx.noises) {
+    for (const noise of canFight ? ctx.noises : []) {
       for (const bot of bots) {
         if (!bot.alive || bot.target) continue;
         const d = Math.hypot(bot.pos.x - noise.x, bot.pos.z - noise.z);
@@ -262,7 +267,7 @@ export function createBots(scene, world) {
       // Perception, staggered. Compare the underlying entity (ref), not the
       // fresh wrapper visibleEnemy builds per scan: otherwise the reaction
       // timer resets on every scan and the bot never fires.
-      if (time >= bot.scanAt && !blinded) {
+      if (canFight && time >= bot.scanAt && !blinded) {
         bot.scanAt = time + 0.12 + Math.random() * 0.05;
         const seen = visibleEnemy(bot, ctx);
         if (seen && (!bot.target || bot.target.ref !== seen.ref)) {
@@ -282,12 +287,12 @@ export function createBots(scene, world) {
         && Math.hypot(bot.pos.x - ctx.bomb.pos.x, bot.pos.z - ctx.bomb.pos.z) < 2.5;
 
       // Channels: planting (carrier in site) and defusing (defender at planted charge).
-      if (inSite && bot.team === 'sandline' && !blinded) {
+      if (canFight && inSite && bot.team === 'sandline' && !blinded) {
         bot.channel = 'plant';
         bot.plantProgress += dt / 3;
         bot.vel.set(0, 0, 0);
         if (bot.plantProgress >= 1) ctx.onPlantDone(bot);
-      } else if (atPlanted && !blinded) {
+      } else if (canFight && atPlanted && !blinded) {
         bot.channel = 'defuse';
         bot.defuseProgress += dt / 5;
         bot.vel.set(0, 0, 0);
@@ -299,7 +304,7 @@ export function createBots(scene, world) {
       }
 
       // Combat: face and fire at a visible target.
-      if (target && time >= bot.reactAt && !bot.channel) {
+      if (canFight && target && time >= bot.reactAt && !bot.channel) {
         const tx = target.pos.x;
         const tz = target.pos.z;
         const dx = tx - bot.pos.x;
