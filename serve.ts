@@ -1,19 +1,23 @@
-// A tiny static server for game/ (Node 22, standard library only), so an entry can be played
-// locally without a build step: `node serve.ts` serves game/ on http://localhost:8080.
-// It sends the MIME types a browser game needs, refuses any path outside game/, and otherwise
-// does nothing clever: this is a development convenience, not a web server for the internet.
-import { createReadStream, statSync } from 'node:fs';
-import { createServer } from 'node:http';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+// Tiny static file server for local development of the SANDLINE game.
+//
+// Run it from the repo root with `node serve.ts` (or `node serve.ts --port
+// 8901`) and open http://localhost:8080. It serves the game/ directory and
+// nothing else: any request that would escape game/ is refused, and nothing
+// is cached, so edits show up on the next reload.
+//
+// This is a dev convenience, not a production server: it binds loopback
+// only, has no directory listings, no range support and no compression.
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createReadStream, stat } from 'node:fs';
+import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = resolve(fileURLToPath(new URL('./game', import.meta.url)));
-const args = process.argv.slice(2);
-const portIndex = args.indexOf('--port');
-const requested = portIndex === -1 ? 8080 : Number(args[portIndex + 1]);
-const port = Number.isInteger(requested) && requested > 0 && requested < 65536 ? requested : 8080;
+const GAME_DIR = resolve(fileURLToPath(new URL('./game/', import.meta.url)));
+const DEFAULT_PORT = 8080;
 
-const MIME: Record<string, string> = {
+// Content type by extension. Text types carry an explicit UTF-8 charset;
+// anything unlisted is served as a generic binary download.
+const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
@@ -27,36 +31,75 @@ const MIME: Record<string, string> = {
   '.ogg': 'audio/ogg',
 };
 
-createServer((request, response) => {
-  const url = new URL(request.url ?? '/', 'http://localhost');
-  let pathname: string;
+function pickPort(argv: string[]): number {
+  const at = argv.indexOf('--port');
+  if (at < 0 || at + 1 >= argv.length) return DEFAULT_PORT;
+  const n = Number.parseInt(argv[at + 1], 10);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) return DEFAULT_PORT;
+  return n;
+}
+
+function fail(res: ServerResponse, status: number, message: string): void {
+  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
+  res.end(message);
+}
+
+async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Only the path part of the URL matters here; a bare host never reaches us.
+  const raw = req.url ?? '/';
+  const pathOnly = raw.split('?')[0].split('#')[0];
+
+  let decoded: string;
   try {
-    pathname = decodeURIComponent(url.pathname);
+    decoded = decodeURIComponent(pathOnly);
   } catch {
-    response.writeHead(400).end('bad request');
+    fail(res, 400, 'bad request');
     return;
   }
-  if (pathname.endsWith('/')) pathname += 'index.html';
-  const file = resolve(join(root, normalize(pathname)));
-  if (file !== root && !file.startsWith(root + sep)) {
-    response.writeHead(403).end('forbidden');
+
+  // A trailing slash means "the index page of this folder".
+  const relPath = decoded.endsWith('/') ? `${decoded}index.html` : decoded;
+
+  // Resolve inside game/ and refuse anything that climbs out of it.
+  const target = resolve(join(GAME_DIR, relPath));
+  if (target !== GAME_DIR && !target.startsWith(GAME_DIR + sep)) {
+    fail(res, 403, 'forbidden');
     return;
   }
-  let size: number;
+
+  let info;
   try {
-    const stats = statSync(file);
-    if (!stats.isFile()) throw new Error('not a file');
-    size = stats.size;
+    info = await new Promise<{ isFile: boolean; size: number }>((done, nope) => {
+      stat(target, (err, st) => {
+        if (err) return nope(err);
+        done({ isFile: st.isFile(), size: st.size });
+      });
+    });
   } catch {
-    response.writeHead(404).end('not found');
+    fail(res, 404, 'not found');
     return;
   }
-  response.writeHead(200, {
-    'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
-    'content-length': size,
+  if (!info.isFile) {
+    fail(res, 404, 'not found');
+    return;
+  }
+
+  res.writeHead(200, {
+    'content-type': TYPES[extname(target).toLowerCase()] ?? 'application/octet-stream',
+    'content-length': info.size,
     'cache-control': 'no-store',
   });
-  createReadStream(file).pipe(response);
-}).listen(port, '127.0.0.1', () => {
+  createReadStream(target).pipe(res);
+}
+
+const port = pickPort(process.argv.slice(2));
+const server = createServer((req, res) => {
+  void handle(req, res).catch(() => {
+    if (!res.headersSent) fail(res, 500, 'internal error');
+    else res.destroy();
+  });
+});
+
+server.listen(port, '127.0.0.1', () => {
   console.log(`game/ is on http://localhost:${port}`);
 });
